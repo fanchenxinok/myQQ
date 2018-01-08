@@ -19,12 +19,10 @@
 
 typedef struct UserInfo
 {
-	char userId[1024];  //user name
+	char userId[20];  //user name
 	int socketfd;    //user socket fd
 	int logFlag;     //user login state
 	int rtspPlayFlag;
-	char ip[30];     //user ip addr
-	sem_t sem;
 }UIfo;
 
 typedef struct UserList

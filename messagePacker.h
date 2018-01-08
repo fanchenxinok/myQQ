@@ -38,9 +38,8 @@ typedef enum
 typedef struct _message_
 {
     emMsgType msgType;
-    char name[24];
-    char userIp[16];
-    char msgText[1024];
+    char name[20];
+    char msgText[512];
 }msg_st;
 
 /**

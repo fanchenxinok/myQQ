@@ -3,7 +3,7 @@
 
 #define portnumber 3333   //用来连接服务器
 #define userPortNumber "8888"  //UDP端口用来和其他客户端通信的
-#define MAXSIZE 1024
+#define MAXSIZE 512
 
 UL* onlineUser = NULL;
 static char myname[MAXSIZE];
@@ -86,7 +86,7 @@ int UserLogin(int serverSocket)
         }
         else if(msg.msgType == MSG_USER_UN_EXIST){
             printf("User name: %s is not exist, you can regist a new user.\n", name);
-            printf("if you want to register a new user, input 'r' after input 'y'.\n");
+            printf("if you want to register a new user, input 'y'.\n");
             printf("Please input (y/n) >: ");
             char c;
             c = myGetChar();
@@ -187,10 +187,20 @@ int startPlayShareMedia(const char* portNumber)
     return child_pid;
 }
 
+void closeChildProcess(int *pPid)
+{
+    if(*pPid != -1){
+        kill(*pPid, SIGKILL);
+        waitpid(*pPid, NULL, 0); /* 一定要wait 不然会产生僵尸线程 */
+        *pPid = -1;
+    }
+    return;
+}
+
 static void alarm_fun()
 {
     if(s_loginFlag == LOGIN_NO){
-        printf("login time out\n");
+        printf("login time out!!!\n");
         alarm(0);
         exit(0);
     }
@@ -232,7 +242,7 @@ void getCommand1(int sockfd)
                 int res = UserLogin(sockfd);
                 if(res == RES_FAIL){
                     printf("UserLogin return LOGIN_FAIL....\n");
-                    	close(sockfd);
+                    close(sockfd);
                 	exit(0);
                 }
                 else if(res == RES_GO_REGIST){
@@ -254,7 +264,7 @@ void getCommand1(int sockfd)
                 printf("Please Register a new count....\n");
                 signal(SIGALRM, alarm_fun); //等待信号到来
                 alarm(300); //定时300秒，为了防止客户端太久不登录
-                //用户登录
+                //用户注册
                 int rec = UserRegister(sockfd);
                 if(rec == RES_FAIL){
                      close(sockfd);
@@ -415,27 +425,16 @@ char getCommand3(int sockfd)
     return c;
 }
 
-void closeChildProcess(int *pPid)
-{
-    if(*pPid != -1){
-        kill(*pPid, SIGKILL);
-        waitpid(*pPid, NULL, 0); /* 一定要wait 不然会产生僵尸线程 */
-        *pPid = -1;
-    }
-    return;
-}
-
 void handleMessage(msg_st *msg)
 {
     if(!msg) return;
     switch(msg->msgType){
         case MSG_FLASH_OL_USERS:
             {
-                printf("    User-> name: %s; ip: %s\n", msg->name, msg->userIp);
+                printf("    User-> name: %s\n", msg->name);
                 if(findNodeByName(onlineUser, msg->name) == NULL){ 
                     UIfo user;
                     strncpy(user.userId, msg->name, strlen(msg->name) +1);
-                    strncpy(user.ip, msg->userIp, strlen(msg->userIp) + 1);
                     user.logFlag = LOGIN_YES;
                     addUserToList(onlineUser, user);
                 }
@@ -509,6 +508,7 @@ void talkingWithServer(int TcpSocket)
                     memset(buffer, 0, sizeof(buffer));
                     fgets(buffer, MAXSIZE, stdin);
                     if(strncmp(buffer, "yes", 3)== 0){
+						sendMsgToServer(TcpSocket, MSG_USER_STOP_PLAY_MEDIA, NULL);
                         sendMsgToServer(TcpSocket, MSG_USER_QUIT, NULL); 
                         sleep(2);
                         FD_CLR(TcpSocket, &readfd);

@@ -1179,5 +1179,24 @@ EM_RES myQQ_GetAllUsers(UL* userHead)
     return QQ_OK;
 }
 
+EM_RES myQQ_IsSamePassward(const char* name, const char* passward)
+{
+    EM_RES res = QQ_FAIL;
+    char pSavePassWard[24];
+    int rc = qq_sql3_check_by_name(name, pSavePassWard);
+    if(rc < 0){
+        printf("[QQ DB]User %s do not exist !!!!\n", name);
+        return QQ_USER_UN_EXIST;
+    }
+
+    if(strcmp(passward, pSavePassWard) == 0){
+        printf("[QQ DB]passward is equal!!!!\n");
+        return QQ_OK;
+    }
+
+    return res;
+}
+
+
 #endif
 

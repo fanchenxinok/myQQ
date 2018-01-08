@@ -56,4 +56,6 @@ EM_RES myQQ_UserIsLogin(const char* name);
 #endif
 EM_RES myQQ_GetAllUsers(UL* userHead);
 
+EM_RES myQQ_IsSamePassward(const char* name, const char* passward);
+
 #endif

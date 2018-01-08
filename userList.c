@@ -14,10 +14,10 @@ UL* initUserList()
 
 void addUserToList(UL* head, UIfo userInfo)
 {
-       if(!head){
-            printf("head is NULL!\n");
-            return;
-       }
+	if(!head){
+	    printf("head is NULL!\n");
+	    return;
+	}
 	UL* new = (UL*)malloc(sizeof(UL));
 	if(!new){
 		printf("malloc error!\n");
@@ -132,9 +132,9 @@ void printAllUserInfo(UL* head)
     if(!head) return;
     UL *p = head->next;
     while(p){
-        printf("name:%s, ip:%s, sockfd:%d, login_flag:%s\n", 
-            p->nodeInfo.userId, p->nodeInfo.ip,
-            p->nodeInfo.socketfd, (p->nodeInfo.logFlag == 1) ? "LOGIN_YES" : "LOGIN_NO");
+        printf("name:%s, sockfd:%d, login_flag:%s\n", 
+            p->nodeInfo.userId, p->nodeInfo.socketfd,
+            (p->nodeInfo.logFlag == 1) ? "LOGIN_YES" : "LOGIN_NO");
         p = p->next;
     }
     return;
@@ -192,3 +192,22 @@ void setLoginByName(UL* head, const char* name, const int islogin)
     }
     return;
 }
+
+void setLoginBySockID(UL* head, const int sockfd, const int islogin)
+{
+    if(!head) return;
+    UL* p = head->next;
+    while(p != NULL){
+        if(p->nodeInfo.socketfd != sockfd){
+            p = p->next;
+        }
+        else
+            break;
+    }
+
+    if(p != NULL){
+        p->nodeInfo.logFlag = islogin;
+    }
+    return;
+}
+

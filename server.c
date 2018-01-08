@@ -5,7 +5,7 @@
 
 #define portnumber 3333
 #define MAXCLIENTNUM 100  //运行连接的最大客户量
-#define MAXSIZE 1024
+#define MAXSIZE 512
 #define RTSP_SERVER_PORT "8554"
 static char buffer[MAXSIZE];
 static int userNumber = 0;
@@ -13,7 +13,7 @@ static int udpServerPid = -1;
 static int rtsp_server_pid = -1;
 static int rtsp_client_num = 0;
 
-UL* userHead = NULL; //用户链表头
+static UL* userHead = NULL; //用户链表头
 
 #define USE_SQLITE3_DB (1)
 
@@ -22,6 +22,33 @@ UL* userHead = NULL; //用户链表头
 
 #define STR_LINK(a, b)  a ## b
 #define THREAD_NAME_MAKE(a, b) STR_LINK(a, b)
+
+static void epollAddEvent(int epollFd, int addFd, int state)
+{
+	struct epoll_event ev;
+	ev.events = state;
+	ev.data.fd = addFd;
+	epoll_ctl(epollFd, EPOLL_CTL_ADD, addFd, &ev);
+	return;
+}
+
+static void epollDeleteEvent(int epollFd, int addFd, int state)
+{
+	struct epoll_event ev;
+	ev.events = state;
+	ev.data.fd = addFd;
+	epoll_ctl(epollFd, EPOLL_CTL_DEL, addFd, &ev);
+	return;
+}
+
+static void epollModifyEvent(int epollFd, int addFd, int state)
+{
+	struct epoll_event ev;
+	ev.events = state;
+	ev.data.fd = addFd;
+	epoll_ctl(epollFd, EPOLL_CTL_MOD, addFd, &ev);
+	return;
+}
 
 static void sendMsgToUser(int socketFd, emMsgType msgType, const char* msgText)
 {
@@ -64,12 +91,10 @@ static void sendUserAcountInfo(int sockfd, int ReOnline)
                     continue;
                 }
                 
-                memset(msg_send.name, '\0', 24);
-                memset(msg_send.userIp, '\0', 16);
+                memset(msg_send.name, '\0', 20);
                 strcpy(msg_send.name, p->nodeInfo.userId);
-                strcpy(msg_send.userIp, p->nodeInfo.ip);
                 write(sockfd, &msg_send, sizeof(msg_st));
-                printf("******name: %s *******ip: %s ********\n", msg_send.name, msg_send.userIp);
+                printf("******name: %s *******\n", msg_send.name);
                 p = p->next;
                 usleep(5000);  /* 睡眠5 MS */
             }
@@ -78,7 +103,7 @@ static void sendUserAcountInfo(int sockfd, int ReOnline)
             msg_send.msgType = MSG_FLASH_ALL_USERS;
             int n = 1;
             while(p != NULL){
-                memset(msg_send.name, '\0', 24);
+                memset(msg_send.name, '\0', 20);
                 strcpy(msg_send.name, p->nodeInfo.userId);
                 sprintf(msg_send.msgText, "     User <%d>: <name: %s, login: %s>.", \
                     n, p->nodeInfo.userId, (p->nodeInfo.logFlag == 1 ? "YES" : "NO"));
@@ -116,19 +141,6 @@ static void brocastOnlineUserInfo(UL* head, int cur_fd)
     }
     return;
 }
-
-#if NEED_SAVE_LOGIN_FLAG
-static void setAllUserLogout(UL* head)
-{
-    if(!head) return;
-    UL* pCur = head->next;
-    while(pCur){
-        myQQ_SetUserLogout(pCur->nodeInfo.userId);
-        pCur = pCur->next;
-    }
-    return;
-}
-#endif
 
 static void closeChildProcess(int *pPid)
 {
@@ -174,17 +186,29 @@ static void brocastMessage(UL* head, const char* msg, const int cur_fd)
 }
 
 
-static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
+static void handleMessage(int sockfd, msg_st *msg)
 {
-    if(!msg || !user_info)
+    if(!msg)
         return;
-    char name[24], passward[24];
+    char name[20], passward[20];
+
+	UL *pNode = NULL;
+	if(msg->msgType != MSG_USER_REGIST && 
+		msg->msgType !=  MSG_USER_LOGIN_CHECK){
+		pNode = findNodeBySocketID(userHead, sockfd);
+		if(pNode == NULL){
+			printf("[tcp server] can not find node by sockfd: %d in list!!!!!\n", sockfd);
+			return;
+		}
+	}
+
+	printf("[tcp server] handleMessage()->sockfd = %d\n", sockfd);
     
     switch(msg->msgType){
         case MSG_USER_REGIST:
             {
-                memset(name, '\0', sizeof(char) * 24);
-                memset(passward, '\0', sizeof(char) *24);
+                memset(name, '\0', sizeof(char) * 20);
+                memset(passward, '\0', sizeof(char) *20);
                 char c = ';';
                 char* p = strchr(msg->msgText, c);
                 strncpy(name, msg->msgText, p - msg->msgText);
@@ -199,10 +223,14 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
                 }
                 else if(res == QQ_OK){
                     sendMsgToUser(sockfd, MSG_USER_REGIST_OK, NULL);
-                    strncpy(user_info->userId, name, strlen(name) + 1);
+					UIfo newUser;
+					memset(&newUser, 0, sizeof(UIfo));
+			        newUser.socketfd = sockfd;
+			        newUser.logFlag = 0;
+			        newUser.rtspPlayFlag = 0;
+                    strncpy(newUser.userId, name, strlen(name) + 1);
                     printf("[tcp server]regist user success!!!!\n");
-                    user_info->logFlag = 0;
-                    addUserToList(userHead, *user_info);
+                    addUserToList(userHead, newUser);
                 }
                 else{
                     sendMsgToUser(sockfd, MSG_FAIL, NULL);
@@ -212,8 +240,8 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
             break;
         case MSG_USER_LOGIN_CHECK:
             {
-                memset(name, '\0', sizeof(char) * 24);
-                memset(passward, '\0', sizeof(char) *24);
+                memset(name, '\0', sizeof(char) * 20);
+                memset(passward, '\0', sizeof(char) *20);
                 char c = ';';
                 char* p = strchr(msg->msgText, c);
                 strncpy(name, msg->msgText, p - msg->msgText);
@@ -224,6 +252,12 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
 
                 /* 先检查用户是否已经等录 */
                 UL *pNode = findNodeByName(userHead, name);
+				if(pNode == NULL){
+					sendMsgToUser(sockfd, MSG_USER_UN_EXIST, NULL);
+                    printf("[tcp server]Login user %s is not exist!!!!\n", name);
+					return;
+				}
+				
                 if((pNode != NULL) && (pNode->nodeInfo.logFlag == 1)){
                     sendMsgToUser(sockfd, MSG_USER_HAS_ONLINE, NULL);
                     printf("[tcp server]Login user %s has online!!!!\n", name);
@@ -235,7 +269,7 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
                 
                 if(res == QQ_USER_UN_EXIST){
                     sendMsgToUser(sockfd, MSG_USER_UN_EXIST, NULL);
-                    printf("[tcp server]Login user %s is not regist!!!!\n", name);
+                    printf("[tcp server]Login user %s is not exist!!!!\n", name);
                 }
                 else if(res == QQ_PASSWARD_WRONG){
                     sendMsgToUser(sockfd, MSG_USER_LOGIN_FAIL, NULL);
@@ -243,27 +277,15 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
                 }
                 else if(res == QQ_OK){
                     sendMsgToUser(sockfd, MSG_USER_LOGIN_OK, NULL);
-                    strncpy(user_info->userId, name, strlen(name) + 1);
-                    if(pNode == NULL){
-                        user_info->logFlag = 1;
-                        addUserToList(userHead, *user_info);
-                    }
-                    else{
-                        pNode->nodeInfo.logFlag = 1;
-                        user_info->logFlag = 1;
-                        pNode->nodeInfo.socketfd = user_info->socketfd;
-                        strcpy(pNode->nodeInfo.ip, user_info->ip);
-                        #if NEED_SAVE_LOGIN_FLAG
-                        myQQ_SetUserLogin(name);
-                        #endif
-                    }
+                    pNode->nodeInfo.logFlag = 1;
+                    pNode->nodeInfo.socketfd = sockfd;
                     
                     printf("[tcp server]Login success!!!!\n");
 
-                    char msgText[1024];
-                    sprintf(msgText, "User %s has login, all online uses as following:", user_info->userId);
-                    brocastMessage(userHead, msgText, user_info->socketfd);
-                    brocastOnlineUserInfo(userHead, user_info->socketfd);
+                    char msgText[MAXSIZE];
+                    sprintf(msgText, "User %s has login, all online uses as following:", name);
+                    brocastMessage(userHead, msgText, sockfd);
+                    brocastOnlineUserInfo(userHead, sockfd);
                 }
                 else{
                     printf("[tcp server]Login fail!!!!\n");
@@ -279,48 +301,32 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
         case MSG_SEARCH_SOMEONE:
             searchAndReply(msg->name, sockfd);
             break;
-        case MSG_USER_STOP_PLAY_MEDIA:
-            {
-                if(user_info->rtspPlayFlag == 1){
-                    user_info->rtspPlayFlag = 0;
-                    if(--rtsp_client_num == 0 &&
-                        rtsp_server_pid != -1){
-                        closeChildProcess(&rtsp_server_pid);
-                        printf("******* rtsp server is closed************\n");
-                    }
-                }
-                else{
-                    printf("user: %s had not open rtsp client to play share media.\n", user_info->userId);
-                }
-                printf("&&&  rtsp client number = %d\n", rtsp_client_num);
-            }
-            break;  
         case MSG_USER_RENAME:
             {
-                printf("[tcp server]User %s want to change name to %s.\n", user_info->userId, msg->name);
+                printf("[tcp server]User %s want to change name to %s.\n", pNode->nodeInfo.userId, msg->name);
                 msg_st msg_send;
                 if(msg->name[0] == '\0'){
                     sendMsgToUser(sockfd, MSG_BROCAST, "Server say: name can not be null!!!");
                     return;
                 }
                 
-                EM_RES res = myQQ_ChangeName(user_info->userId, msg->name);
+                EM_RES res = myQQ_ChangeName(pNode->nodeInfo.userId, msg->name);
                 if(res != QQ_OK){
                     printf("[tcp server]change user name in database fail!!!!\n");
                     return;
                 }
 
-                UL* my = findNodeByName(userHead, user_info->userId);
+                UL* my = findNodeByName(userHead, pNode->nodeInfo.userId);
                 if(my){
                     strncpy(my->nodeInfo.userId, msg->name, strlen(msg->name) +1);
                 }
                 else{
-                    printf("[tcp server] can not find %s in userHead list\n", user_info->userId);
-                    myQQ_ChangeName(msg->name, user_info->userId);
+                    printf("[tcp server] can not find %s in userHead list\n", pNode->nodeInfo.userId);
+                    myQQ_ChangeName(msg->name, pNode->nodeInfo.userId);
                     return;
                 }
                 
-                strncpy(user_info->userId, msg->name, strlen(msg->name) +1);
+                strncpy(pNode->nodeInfo.userId, msg->name, strlen(msg->name) +1);
                 printf("[tcp server]change online user name done!!!!\n");
 
                 msg_send.msgType = MSG_USER_RENAME_OK;
@@ -335,7 +341,14 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
                     sendMsgToUser(sockfd, MSG_BROCAST, "Server say: passward can not be null!!!");
                     return;
                 }
-                EM_RES res = myQQ_ChangePassward(user_info->userId, msg->msgText);
+				EM_RES res = myQQ_IsSamePassward(pNode->nodeInfo.userId, msg->msgText);
+				if(res == QQ_OK){ //密码相同不用修改
+					printf("[tcp server] the new passward is the same to old one!!!\n");
+					sendMsgToUser(sockfd, MSG_BROCAST, "the new passward is the same to old one, no need change!!!");
+					return;
+				}
+				
+                res = myQQ_ChangePassward(pNode->nodeInfo.userId, msg->msgText);
                 if(res != QQ_OK){
                     printf("[tcp server]change user passward in database fail!!!!\n");
                     return;
@@ -346,48 +359,43 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
             break;
         case MSG_USER_UNREGIST:
             {
-                printf("[tcp server] handing user %s unregister request!!\n", user_info->userId);
-                EM_RES res = myQQ_UnRegister(user_info->userId);
+                printf("[tcp server] handing user %s unregister request!!\n", pNode->nodeInfo.userId);
+                EM_RES res = myQQ_UnRegister(pNode->nodeInfo.userId);
                 if(res != QQ_OK){
                     sendMsgToUser(sockfd, MSG_BROCAST, "Server say: unregister fail!!!");
                     return;
                 }
 
-                deleteNodeByName(userHead, user_info->userId);
+				printf("[tcp server] UnRegister (%s) success!!!!\n", pNode->nodeInfo.userId);
+                deleteNodeByName(userHead, pNode->nodeInfo.userId);
                 sendMsgToUser(sockfd, MSG_USER_UNREGIST_OK, NULL);
-                printf("[tcp server] UnRegister (%s) success!!!!\n", user_info->userId);
 
                 /* 广播用户注销的消息 */
                 char msgText[MAXSIZE];
                 memset(msgText, '\0', MAXSIZE);
-                sprintf(msgText, "User %s has unregister!!", user_info->userId);
-                brocastMessage(userHead, msgText, user_info->socketfd);
-                brocastOnlineUserInfo(userHead, user_info->socketfd);
+                sprintf(msgText, "User %s has unregister!!", pNode->nodeInfo.userId);
+                brocastMessage(userHead, msgText, pNode->nodeInfo.socketfd);
+                brocastOnlineUserInfo(userHead, pNode->nodeInfo.socketfd);
             }
             break;
        case MSG_USER_LOGOUT:
             {
-                printf("[tcp server] handing user %s logout request!!\n", user_info->userId);
-                UL *pNode = findNodeByName(userHead, user_info->userId);
                 if(pNode){
-                    #if NEED_SAVE_LOGIN_FLAG
-                    myQQ_SetUserLogout(user_info->userId);
-                    #endif
+					printf("[tcp server] handing user %s logout request!!\n", pNode->nodeInfo.userId);
                     pNode->nodeInfo.logFlag = 0;
                     sendMsgToUser(sockfd, MSG_USER_LOGOUT_OK, NULL);
                 }
                 else{
-                    printf("[tcp server] handing user logout can not find %s in user's list\n", user_info->userId);
                     sendMsgToUser(sockfd, MSG_BROCAST, "server say: logout fail because of you are not in user list!!\n");
                 }
 
                 /* 广播用户退出登录的消息 */
                 char msgText[MAXSIZE];
                 memset(msgText, '\0', MAXSIZE);
-                sprintf(msgText, "User %s has logout!!!", user_info->userId);
-                brocastMessage(userHead, msgText, user_info->socketfd);
-                brocastOnlineUserInfo(userHead, user_info->socketfd);
-                printf("[tcp server] User (%s) logout success!!!!\n", user_info->userId);
+                sprintf(msgText, "User %s has logout!!!", pNode->nodeInfo.userId);
+                brocastMessage(userHead, msgText, pNode->nodeInfo.socketfd);
+                brocastOnlineUserInfo(userHead, pNode->nodeInfo.socketfd);
+                printf("[tcp server] User (%s) logout success!!!!\n", pNode->nodeInfo.userId);
             }
             break;
         case MSG_USER_REQ_MEDIA:
@@ -395,131 +403,112 @@ static void handleMessage(int sockfd, msg_st *msg, UIfo *user_info)
                 /* 有客户端需要同步播放视频 */
                 if(rtsp_server_pid == -1){ /* 第一次请求 */
                     rtsp_server_pid = startRtspSendMediaServer();
-                    if(rtsp_server_pid != -1 && user_info->rtspPlayFlag != 1){
+                    if(rtsp_server_pid != -1 && pNode->nodeInfo.rtspPlayFlag != 1){
                         sendMsgToUser(sockfd, MSG_SERVER_MEDIA_PLAYING, RTSP_SERVER_PORT);
-                        user_info->rtspPlayFlag = 1;
+                        pNode->nodeInfo.rtspPlayFlag = 1;
                         rtsp_client_num++;
                         printf("####### rtsp server is running[clients:%d]............\n", rtsp_client_num);
                     }
                 }
                 else{ /*其他客户端请求*/
-                    if(user_info->rtspPlayFlag != 1){
+                    if(pNode->nodeInfo.rtspPlayFlag != 1){
                         sendMsgToUser(sockfd, MSG_SERVER_MEDIA_PLAYING, RTSP_SERVER_PORT);
-                        user_info->rtspPlayFlag = 1;
+                        pNode->nodeInfo.rtspPlayFlag = 1;
                         rtsp_client_num++;
                         printf("####### rtsp server is running[clients:%d]............\n", rtsp_client_num);
                     }
                 }
             }
             break;
+		case MSG_USER_STOP_PLAY_MEDIA:
+            {
+                if(pNode->nodeInfo.rtspPlayFlag == 1){
+                    pNode->nodeInfo.rtspPlayFlag = 0;
+                    if(--rtsp_client_num == 0 &&
+                        rtsp_server_pid != -1){
+                        closeChildProcess(&rtsp_server_pid);
+                        printf("******* rtsp server is closed************\n");
+                    }
+                }
+                else{
+                    printf("user: %s had not open rtsp client to play share media.\n", pNode->nodeInfo.userId);
+                }
+                printf("&&&  rtsp client number = %d\n", rtsp_client_num);
+            }
+            break;  
         default:
             if(msg->msgText[0] != '\0'
                 && msg->msgText[0] != '\n'){
                 //printf("msg->msgText[0]= %c, msgType = %d\n", msg->msgText[0],msg->msgType);
-                printf("User %s say: %s\n", user_info->userId, msg->msgText);
+                printf("User %s say: %s\n", pNode->nodeInfo.userId, msg->msgText);
             }
             break;
     }
     return;
 }
 
-static void Process(void *arg)
+static void epollProcess(int epollFd, int userFd)
 {	
-    pthread_t pdt = pthread_self();
-    char pname[10];
-    int a = 100;
-    pthread_setname_np(pdt, TO_STR(THREAD_NAME_MAKE(pth_, process)));
-    pthread_getname_np(pdt, pname);
-    printf("----------pthread <%s> starting... Thread ID: %ld-----------\n", pname, pdt);
-
-    fd_set readfd;
     int nbytes;
-    UIfo* pUser = (UIfo*)arg;
-    UIfo user;
-    memcpy(&user, pUser, sizeof(UIfo));  //拷贝下
-    pUser = &user;
-
-    /* TCP 服务线程开始监控 */
     msg_st msg;
     fflush(stdin); //清缓存
-    while(1){
-        FD_ZERO(&readfd);
-        FD_SET(pUser->socketfd, &readfd);
-        FD_SET(0, &readfd);
-        int i, maxfd = pUser->socketfd + 1;
-        int r = select(maxfd, &readfd, NULL, NULL, NULL);
-        if(r >= 0){
-            //服务器接收消息
-            if(FD_ISSET( pUser->socketfd, &readfd)){
-                sem_wait(&pUser->sem); //获取信号量
-                memset(&msg, 0, sizeof(msg_st));
-                if((nbytes = read( pUser->socketfd, &msg, sizeof(msg_st))) == -1){ 
-                    fprintf(stderr,"Read Error:%s\n",strerror(errno));
-                    sem_post(&pUser->sem);  //一定要释放信号量
-                    break;
-                }
-                
-                if((nbytes == 0) || (msg.msgType == MSG_USER_QUIT)){
-                    printf("pUser->logFlag = %d\n", pUser->logFlag);
-                    if(pUser->logFlag != 1) break;
-                    printf("User %s has exit!, sockfd = %d\n", pUser->userId, pUser->socketfd);
-                    printf("*<Before>*:\n");
-                    showAllUsers(userHead);
-                    /* 将该用户设置为非登录状态 */
-                    #if NEED_SAVE_LOGIN_FLAG
-                    EM_RES res = myQQ_SetUserLogout(pUser->userId);  
-                    if(res != QQ_OK){
-                        printf("myQQ_SetUserUnlogin() fail!!\n");
-                    }
-                    #endif
-                    setLoginByName(userHead, pUser->userId, LOGIN_NO);
-                    
-                    printf("*<After>*:\n");
-                    showAllUsers(userHead);
-                    printf("left %d users online.....\n", numberOfOnlineUsers(userHead));
+    memset(&msg, 0, sizeof(msg_st));	
 
-                    /* 广播用户退出的消息 */
-                    memset(msg.msgText, '\0', MAXSIZE);
-                    sprintf(msg.msgText, "User %s has exit!!", pUser->userId);
-                    brocastMessage(userHead, msg.msgText, pUser->socketfd);
-                    brocastOnlineUserInfo(userHead, pUser->socketfd);
-
-                    if(pUser->rtspPlayFlag == 1){
-                        if(--rtsp_client_num == 0 
-                            && rtsp_server_pid != -1){ /* 如果所有的客户端都结束了关闭rtsp服务器 */
-                            closeChildProcess(&rtsp_server_pid);
-                            printf("******* rtsp server is closed************\n");
-                        }
-                        pUser->rtspPlayFlag = 0;
-                    }                        
-
-                    printf("&&&  rtsp client number = %d\n", rtsp_client_num);
-                    sem_post(&pUser->sem);  //一定要释放信号量
-                    break;
-                }
-
-                handleMessage(pUser->socketfd, &msg, pUser);
-                
-                sem_post(&pUser->sem); //释放信号量
-            }
-        }
-        else{
-            //em_post(user->sem); //释放信号量
-            printf("select error!\n");
-            break;
-        }
-        usleep(50000); //实现一对多通信
+    if((nbytes = read( userFd, &msg, sizeof(msg_st))) == -1){ 
+        fprintf(stderr,"Read Error:%s\n",strerror(errno));
+        return;
     }
     
-    FD_CLR(pUser->socketfd, &readfd);
-    close(pUser->socketfd); 
-    printf("----------pthread <Name: %s> <ID: %ld> is dead----------\n", pname, pdt);
-    pthread_exit(NULL);
+    if((nbytes == 0) || (msg.msgType == MSG_USER_QUIT)){
+		UL *pNode = NULL;
+		pNode = findNodeBySocketID(userHead, userFd);
+		if(pNode == NULL){
+			setLoginBySockID(userHead, userFd, LOGIN_NO);
+			epollDeleteEvent(epollFd, userFd, EPOLLIN);
+			return;
+		}
+		epollDeleteEvent(epollFd, userFd, EPOLLIN);
+        printf("pUser->logFlag = %d\n", pNode->nodeInfo.logFlag);
+        if(pNode->nodeInfo.logFlag != 1) return;
+        printf("User %s has exit!, sockfd = %d\n", pNode->nodeInfo.userId, userFd);
+        printf("*<Before>*:\n");
+        showAllUsers(userHead);
+        /* 将该用户设置为非登录状态 */
+        //setLoginByName(userHead, pNode->nodeInfo.userId, LOGIN_NO);
+        setLoginBySockID(userHead, userFd, LOGIN_NO);
+        
+        printf("*<After>*:\n");
+        showAllUsers(userHead);
+        printf("left %d users online.....\n", numberOfOnlineUsers(userHead));
+
+        /* 广播用户退出的消息 */
+        memset(msg.msgText, '\0', MAXSIZE);
+        sprintf(msg.msgText, "User %s has exit!!", pNode->nodeInfo.userId);
+        brocastMessage(userHead, msg.msgText, userFd);
+        brocastOnlineUserInfo(userHead, userFd);
+
+        if(pNode->nodeInfo.rtspPlayFlag == 1){
+            if(--rtsp_client_num == 0 
+                && rtsp_server_pid != -1){ /* 如果所有的客户端都结束了关闭rtsp服务器 */
+                closeChildProcess(&rtsp_server_pid);
+                printf("******* rtsp server is closed************\n");
+            }
+            pNode->nodeInfo.rtspPlayFlag = 0;
+        }                        
+
+        printf("&&&  rtsp client number = %d\n", rtsp_client_num);
+        return;
+    }
+
+    handleMessage(userFd, &msg);
+	printf("[tcp server] epoll process end!\n");
+    return;
 }
+
 
 int main(int argc, char *argv[]) 
 { 
-    int sockfd,new_fd; 
+    int serverSockfd,new_fd; 
     struct sockaddr_in server_addr; 
     struct sockaddr_in client_addr; 
     int sin_size; 
@@ -552,7 +541,7 @@ int main(int argc, char *argv[])
     } 
 
     /* 服务器端开始建立sockfd描述符 */ 
-    if((sockfd=socket(AF_INET,SOCK_STREAM,0))==-1){ // AF_INET:IPV4;SOCK_STREAM:TCP
+    if((serverSockfd = socket(AF_INET,SOCK_STREAM,0))==-1){ // AF_INET:IPV4;SOCK_STREAM:TCP
         fprintf(stderr,"Socket error:%s\n\a",strerror(errno)); 
         exit(1); 
     } 
@@ -566,11 +555,11 @@ int main(int argc, char *argv[])
     server_addr.sin_port=htons(portnumber);         // (将本机器上的short数据转化为网络上的short数据)端口号
 
     int n = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &n, sizeof(int));//这样使得服务器断开马上就能重新启动
+    setsockopt(serverSockfd, SOL_SOCKET, SO_REUSEADDR, &n, sizeof(int));//这样使得服务器断开马上就能重新启动
 
     /* 捆绑sockfd描述符到IP地址 */ 
     printf("start bindding.....\n");
-    if(bind(sockfd,(struct sockaddr *)(&server_addr),sizeof(struct sockaddr))==-1){ 
+    if(bind(serverSockfd,(struct sockaddr *)(&server_addr),sizeof(struct sockaddr))==-1){ 
         fprintf(stderr,"Bind error:%s\n\a",strerror(errno)); 
         exit(1); 
     } 
@@ -578,7 +567,7 @@ int main(int argc, char *argv[])
     /* 设置允许连接的最大客户端数 */ 
     printf("start listening.....\n");
     printf("The max number of client to allow to connect with server is:%d.....\n", MAXCLIENTNUM);
-    if(listen(sockfd, MAXCLIENTNUM)==-1){ 
+    if(listen(serverSockfd, MAXCLIENTNUM)==-1){ 
         fprintf(stderr,"Listen error:%s\n\a",strerror(errno)); 
         exit(1); 
     } 
@@ -638,44 +627,44 @@ int main(int argc, char *argv[])
     printf("All users in database as follow:\n");
     showAllUsers(userHead);
 
+	int epollFd = epoll_create(MAXCLIENTNUM);
+	epollAddEvent(epollFd, serverSockfd, EPOLLIN);
     while(1)
     {
-        sin_size=sizeof(struct sockaddr_in); 
-        if((new_fd=accept(sockfd,(struct sockaddr *)(&client_addr),&sin_size))==-1){ 
-            fprintf(stderr,"Accept error:%s\n\a",strerror(errno)); 
-            close(sockfd); 
-            freeUserList(userHead);
-            closeChildProcess(&udpServerPid);
-            myQQ_DeInit(); 
-            exit(-1);
-        } 
-        fprintf(stderr,"@@@Server IP: %s\n",inet_ntoa(server_addr.sin_addr));
-        fprintf(stderr,"@@@Server get connection from %s, socketFd = %d\n", inet_ntoa(client_addr.sin_addr), new_fd); // 将网络地址转换成.字符串
+		struct epoll_event events[MAXCLIENTNUM];
+		memset(events, 0, sizeof(struct epoll_event) * MAXCLIENTNUM);
+		printf("[tcp server] epoll waiting......\n");
+		int eventNum = epoll_wait(epollFd, events, MAXCLIENTNUM, -1);
+		printf("[tcp server] epoll wake up, event num = %d!\n", eventNum);
+		int i = 0;
+		for(; i < eventNum; i++){
+			if((events[i].data.fd == serverSockfd) && 
+				(events[i].events & EPOLLIN)){
+		        sin_size=sizeof(struct sockaddr_in); 
+		        if((new_fd = accept(serverSockfd,(struct sockaddr *)(&client_addr),&sin_size))==-1){ 
+		            fprintf(stderr,"Accept error:%s\n\a",strerror(errno)); 
+		            close(serverSockfd); 
+		            freeUserList(userHead);
+		            closeChildProcess(&udpServerPid);
+		            myQQ_DeInit(); 
+		            exit(-1);
+		        } 
+		        printf("@@@Server IP: %s\n",inet_ntoa(server_addr.sin_addr));
+		        printf("@@@Server get connection from %s, socketFd = %d\n", inet_ntoa(client_addr.sin_addr), new_fd); // 将网络地址转换成.字符串
 
-
-        /* 开启线程进行登录检测及后续操作 */
-        UIfo newUser;
-        memset(&newUser, 0, sizeof(UIfo));
-        newUser.socketfd = new_fd;
-        newUser.logFlag = 0;
-        newUser.rtspPlayFlag = 0;
-        int iplen = strlen(inet_ntoa(client_addr.sin_addr));
-        strncpy(newUser.ip, inet_ntoa(client_addr.sin_addr), iplen);
-        newUser.ip[iplen] = '\0';
-        sem_init(&newUser.sem, 0, 1); //初始化信号量
-        pthread_t process_pid;
-        int err = pthread_create(&process_pid, NULL, (void*)Process, (void*)&newUser);
-        if(err != 0){
-            printf("process pthread_create error!\n");
-            close(new_fd);
-        }
+				epollAddEvent(epollFd, new_fd, EPOLLIN);
+			}
+			else{
+				if(events[i].events & EPOLLIN){
+		        	epollProcess(epollFd, events[i].data.fd);
+				}
+			}
+		}
     }
 
     /* 结束通讯 */
-    #if NEED_SAVE_LOGIN_FLAG
-    setAllUserLogout(userHead);  /* 将数据库的状态清除 */
-    #endif
-    close(sockfd); 
+	close(epollFd);
+    close(serverSockfd); 
     freeUserList(userHead);
     closeChildProcess(&udpServerPid);
     myQQ_DeInit();
